@@ -83,6 +83,8 @@ libevl_dso_version = '6.4.0'
 
 libexec_evl = get_option('libexecdir') / 'evl'
 
+build_posix = get_option('posix')
+
 subdir('include')
 subdir('lib')
 subdir('latmus')

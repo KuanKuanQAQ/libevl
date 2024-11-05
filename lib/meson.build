@@ -30,6 +30,11 @@ libevl_sources = [
     'intrinsics/thread.c',
 ]
 
+if build_posix
+   subdir('cobalt')
+   libevl_sources += libcobalt_sources
+endif
+
 stamp_generator = find_program('generate-git-stamp.sh',
     dirs : libevl_scripts,
     required : true

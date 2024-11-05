@@ -67,11 +67,6 @@ libevl_net_headers = [
     'evl/net/socket.h',
 ]
 
-install_headers(
-    libevl_net_headers,
-    subdir : 'evl/net'
-)
-
 if get_option('install-uapi')
    uapi_install = find_program('install-uapi.sh',
 	dirs : libevl_scripts,
@@ -79,4 +74,8 @@ if get_option('install-uapi')
    )
    o_uapi = o_dir
    meson.add_install_script(uapi_install, o_uapi, get_option('includedir'))
+endif
+
+if build_posix
+   subdir('cobalt')
 endif
