@@ -763,12 +763,6 @@ int main(int argc, char *argv[])
 	seed = (unsigned long)now * getpid();
 	srandom(seed);
 
-	do_trace("== heap-torture started at %s", ctime(&now));
-	do_trace("     seq_heap_size=%zuk", seq_max_heap_size / 1024);
-	do_trace("     random_alloc_rounds=%d", random_rounds);
-	do_trace("     pattern_heap_size=%zuk", pattern_heap_size / 1024);
-	do_trace("     pattern_check_rounds=%d", pattern_rounds);
-
 	CPU_ZERO(&affinity);
 	CPU_SET(0, &affinity);
 	ret = sched_setaffinity(0, sizeof(affinity), &affinity);
@@ -780,6 +774,12 @@ int main(int argc, char *argv[])
 	param.sched_priority = 1;
 	pthread_setschedparam(pthread_self(), SCHED_FIFO, &param);
 	__Tcall_assert(ret, evl_attach_self("heap-torture:%d", getpid()));
+
+	do_trace("== heap-torture started at %s", ctime(&now));
+	do_trace("     seq_heap_size=%zuk", seq_max_heap_size / 1024);
+	do_trace("     random_alloc_rounds=%d", random_rounds);
+	do_trace("     pattern_heap_size=%zuk", pattern_heap_size / 1024);
+	do_trace("     pattern_check_rounds=%d", pattern_rounds);
 
 	/*
 	 * Create a series of heaps of increasing size, allocating
