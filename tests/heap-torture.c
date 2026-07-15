@@ -133,13 +133,6 @@ static void random_shuffle(void *vbase, size_t nmemb, const size_t size)
 		(_l > _r) - (_l < _r);		\
 	})
 
-static int sort_by_heap_size(const void *l, const void *r)
-{
-	const struct run_statistics *ls = l, *rs = r;
-
-	return compare_values(rs->heap_size, ls->heap_size);
-}
-
 static int sort_by_alloc_time(const void *l, const void *r)
 {
 	const struct run_statistics *ls = l, *rs = r;
@@ -250,18 +243,16 @@ static int dump_stats(const char *title)
 	do_trace("MAX-F	max time to free block (us)");
 	do_trace("OVRH%%	overhead");
 	do_trace("FRAG%%	external fragmentation");
-	do_trace("FLAGS%%	+shuffle: randomized free");
+	do_trace("FLAGS	+shuffle: randomized free");
 	do_trace("    	+hot: measure after initial alloc/free pass (hot heap)");
 
-	if (max_results > 0) {
-		if (max_results > nrstats)
-			max_results = nrstats;
-		__dump_stats(stats, sort_by_alloc_time, max_results, "alloc time");
-		__dump_stats(stats, sort_by_free_time, max_results, "free time");
-		__dump_stats(stats, sort_by_overhead, max_results, "overhead");
-		__dump_stats(stats, sort_by_frag, max_results, "fragmentation");
-	} else if (max_results < 0)
-		__dump_stats(stats, sort_by_heap_size, nrstats, "heap size");
+	if (!max_results || max_results > nrstats)
+		max_results = nrstats;
+
+	__dump_stats(stats, sort_by_alloc_time, max_results, "alloc time");
+	__dump_stats(stats, sort_by_free_time, max_results, "free time");
+	__dump_stats(stats, sort_by_overhead, max_results, "overhead");
+	__dump_stats(stats, sort_by_frag, max_results, "fragmentation");
 
 	free(stats);
 
@@ -662,10 +653,11 @@ static void usage(void)
         fprintf(stderr, "-p --pattern-test-size       heap size for pattern tests\n");
         fprintf(stderr, "-c --pattern-check-rounds    number of pattern tests\n");
         fprintf(stderr, "-r --random-check-rounds     number of random allocation tests\n");
+        fprintf(stderr, "-n --result-rows             number of results displayed per category (0=unlimited)\n");
         fprintf(stderr, "-v --verbose                 turn on verbosity\n");
 }
 
-#define short_optlist "s:p:c:r:v"
+#define short_optlist "s:p:c:r:n:v"
 
 static const struct option options[] = {
 	{
@@ -687,6 +679,11 @@ static const struct option options[] = {
 		.name = "random-check-rounds",
 		.has_arg = required_argument,
 		.val = 'r',
+	},
+	{
+		.name = "result-rows",
+		.has_arg = required_argument,
+		.val = 'n',
 	},
 	{
 		.name = "verbose",
@@ -737,6 +734,11 @@ int main(int argc, char *argv[])
 			if (random_rounds <= 0)
 				error(1, EINVAL, "invalid round count for random test "
 					"(<= 0)");
+			break;
+		case 'n':
+			max_results = atoi(optarg);
+			if (max_results < 0)
+				error(1, EINVAL, "invalid row count (< 0)");
 			break;
 		case 'v':
 			verbose = 1;
