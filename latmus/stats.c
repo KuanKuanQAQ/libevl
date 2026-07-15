@@ -88,9 +88,9 @@ void __log_results(struct statistics *st,
 		st->all_maxlat = meas->max_lat;
 		if (abort_threshold && st->all_maxlat > abort_threshold) {
 			fprintf(stderr, "latency threshold is exceeded"
-				" (%d >= %.3f), aborting.\n",
-				abort_threshold,
-				(double)st->all_maxlat / 1000.0);
+				" (%.3f >= %d), aborting.\n",
+				(double)st->all_maxlat / 1000.0,
+				abort_threshold / 1000);
 			exit(102);
 		}
 	}
