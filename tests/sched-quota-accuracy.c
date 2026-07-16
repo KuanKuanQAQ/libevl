@@ -1,9 +1,5 @@
 /*
  * SPDX-License-Identifier: MIT
- *
- * Adapted from Xenomai's smokey/sched-quota test (https://xenomai.org/)
- * Copyright (C) Philippe Gerum <rpm@xenomai.org>
- * Relicensed by its author from GPLv2 to MIT.
  */
 
 #include <sys/types.h>
@@ -14,7 +10,6 @@
 #include <stdlib.h>
 #include <getopt.h>
 #include <pthread.h>
-#include <math.h>
 #include <evl/evl.h>
 #include "helpers.h"
 
@@ -24,22 +19,31 @@
 			evl_printf(__fmt "\n", ##__args);	\
 	} while (0)
 
-#define MAX_THREADS 8
-#define TEST_SECS   1
+#define PERIOD_NS		ONE_BILLION
+#define NR_PERIODS		1
+#define QUOTA_PERCENT		15 /* Allot 15% of the CPU bandwidth per period */
+#define DISRUPT_NS		(PERIOD_NS / 20) /* Steal 5% per disruption step */
 
-static unsigned long long crunch_per_sec, loops_per_sec;
+#define MAX_THREADS	8
+#define QUOTA_PRIO	1
+#define DISRUPTOR_PRIO	2
+#define MAIN_PRIO	3
+
+enum runtime_phase {
+	idle_phase,
+	calibration_phase,
+	accuracy_measurement_phase,
+	noise_measurement_phase,
+	disruption_phase,
+} current_phase = idle_phase;
 
 static struct quota_thread_desc {
 	int efd;
 	pthread_t tid;
-	struct evl_sched_attrs attrs;
-	unsigned long count;
+	unsigned long long loops;
 } threads[MAX_THREADS];
 
-static int nrthreads = 3;
-
-/* Default to 10% of the CPU bandwidth. */
-static int quota = 10;
+static int nrthreads = 1;
 
 static int tgid = -1;
 
@@ -49,16 +53,7 @@ static struct evl_mutex lock;
 
 static bool verbose;
 
-/*
- * Try CPU1 first, since we may have a lot of in-band stuff going on
- * CPU0 which we may not want to stall too much while testing
- * (e.g. IRQ handling).
- */
 static int test_cpu = 1;
-
-static bool started;
-
-static volatile sig_atomic_t done;
 
 static struct evl_sem ready;
 
@@ -91,29 +86,7 @@ static const struct option options[] = {
 	{ /* Sentinel */ }
 };
 
-static unsigned long __attribute__(( noinline ))
-__do_work(unsigned long count)
-{
-	struct timespec now, to;
-	int ret;
-
-	__Tcall_assert(ret, evl_read_clock(EVL_CLOCK_MONOTONIC, &now));
-	timespec_add_ns(&to, &now, 100);
-	while (timespec_sub_ns(&to, &now) > 0)
-		__Tcall_assert(ret, evl_read_clock(EVL_CLOCK_MONOTONIC, &now));
-	return count + 1;
-}
-
-static void __attribute__(( noinline ))
-do_work(unsigned long loops, unsigned long *count_r)
-{
-	unsigned long n;
-
-	for (n = 0; n < loops; n++)
-		*count_r = __do_work(*count_r);
-}
-
-static void set_thread_affinity(void)
+static void set_cpu_affinity(void)
 {
 	cpu_set_t affinity;
 	int ret;
@@ -123,72 +96,124 @@ static void set_thread_affinity(void)
 	__Tcall_assert(ret, sched_setaffinity(0, sizeof(affinity), &affinity));
 }
 
-static void *quota_thread(void *arg)
+static void wait_phase(enum runtime_phase phase)
 {
-	int serial = (int)(long)arg, ret;
-	struct quota_thread_desc *t = threads + serial;
-	unsigned long loops;
-
-	set_thread_affinity();
-
-	loops = crunch_per_sec / 100; /* yield every 10 ms */
-
-	t->count = 0;
-
-	__Tcall_assert(t->efd, evl_attach_self("sched-quota-accuracy:%d.%d",
-						getpid(), serial));
-	__Tcall_assert(ret, evl_set_schedattr(t->efd, &threads[serial].attrs));
+	int ret;
 
 	evl_put_sem(&ready);
 
 	__Tcall_assert(ret, evl_lock_mutex(&lock));
 	for (;;) {
-		if (started)
+		if (current_phase == phase)
 			break;
 		__Tcall_assert(ret, evl_wait_event(&barrier, &lock));
 	}
 	__Tcall_assert(ret, evl_unlock_mutex(&lock));
+}
 
-	while (!done) {
-		do_work(loops, &t->count);
-		if (nrthreads > 1)
-			__Tcall_assert(ret, evl_yield());
+static void wait_edge(enum runtime_phase phase)
+{
+	enum runtime_phase old_phase = phase;
+	int ret;
+
+	__Tcall_assert(ret, evl_lock_mutex(&lock));
+	for (;;) {
+		if (current_phase == phase) {
+			current_phase = old_phase;
+			break;
+		}
+		old_phase = current_phase;
+		__Tcall_assert(ret, evl_wait_event(&barrier, &lock));
 	}
+	__Tcall_assert(ret, evl_unlock_mutex(&lock));
+}
 
-	/*
-	 * Each thread is instantiated twice in the course of the
-	 * test, so make sure to detach in order to have the thread
-	 * elements released between runs.
-	 */
-	evl_detach_self();
+static void start_phase(enum runtime_phase phase)
+{
+	int ret;
+
+	__Tcall_assert(ret, evl_lock_mutex(&lock));
+	current_phase = phase;
+	__Tcall_assert(ret, evl_broadcast_event(&barrier));
+	__Tcall_assert(ret, evl_unlock_mutex(&lock));
+}
+
+static void __attribute__(( noinline ))
+do_work(struct quota_thread_desc *t, long work_ns)
+{
+	struct timespec now, to;
+	int ret;
+
+	__Tcall_assert(ret, evl_read_clock(EVL_CLOCK_MONOTONIC, &now));
+	timespec_add_ns(&to, &now, work_ns);
+
+	while (timespec_sub_ns(&to, &now) > 0) {
+		__Tcall_assert(ret, evl_read_clock(EVL_CLOCK_MONOTONIC, &now));
+		if (t) {
+			t->loops++;
+			/*
+			 * Yield to siblings. We do that every ten
+			 * loops not to overconsume the budget with
+			 * scheduling overhead.
+			 */
+			if (nrthreads > 1 && !(t->loops % 10))
+				__Tcall_assert(ret, evl_yield());
+		}
+	}
+}
+
+static void *quota_thread(void *arg)
+{
+	int serial = (int)(long)arg, ret;
+	struct quota_thread_desc *t = threads + serial;
+	struct evl_sched_attrs attrs;
+
+	__Tcall_assert(t->efd, evl_attach_self("quota-runner:%d.%d",
+						getpid(), serial));
+
+	attrs.sched_policy = SCHED_QUOTA;
+	attrs.sched_priority = QUOTA_PRIO;
+	attrs.sched_quota_group = tgid;
+	__Tcall_assert(ret, evl_set_schedattr(t->efd, &attrs));
+
+	wait_phase(calibration_phase);
+
+	do_work(t, PERIOD_NS * NR_PERIODS);
+
+	wait_phase(accuracy_measurement_phase);
+
+	do_work(t, PERIOD_NS * NR_PERIODS);
+
+	wait_phase(noise_measurement_phase);
+
+	do_work(t, PERIOD_NS * NR_PERIODS);
 
 	return NULL;
 }
 
-static void create_quota_thread(int tgid, int serial)
+static void *disruptor_thread(void *arg)
 {
-	struct quota_thread_desc *t = threads + serial;
+	int ret;
 
-	t->attrs.sched_policy = SCHED_QUOTA;
-	t->attrs.sched_priority = 1;
-	t->attrs.sched_quota_group = tgid;
-	new_thread(&t->tid, SCHED_FIFO, 1, quota_thread, (void *)(long)serial);
-}
+	__Tcall_assert(ret, evl_attach_self("quota-disruptor:%d", getpid()));
 
-static void create_fifo_thread(int serial)
-{
-	struct quota_thread_desc *t = threads + serial;
+	wait_phase(noise_measurement_phase);
 
-	t->attrs.sched_policy = SCHED_FIFO;
-	t->attrs.sched_priority = 1;
-	new_thread(&t->tid, SCHED_FIFO, 1, quota_thread, (void *)(long)serial);
+	for (;;) {
+		wait_edge(disruption_phase);
+		do_trace("(...disrupting...)");
+		do_work(NULL, DISRUPT_NS);
+		start_phase(noise_measurement_phase);
+	}
+
+	return NULL;
 }
 
 static int cleanup_group(void)
 {
 	union evl_sched_ctlparam p;
 
-	p.quota.op = evl_quota_remove;
+	p.quota.op = evl_quota_force_remove;
 	p.quota.u.remove.tgid = tgid;
 	return evl_control_sched(SCHED_QUOTA, &p, NULL, test_cpu);
 }
@@ -199,14 +224,20 @@ static void cleanup_group_on_sig(int sig, siginfo_t *si, void *context)
 		cleanup_group();
 }
 
-static double run_quota(int quota)
+struct accuracy_results {
+	double accuracy;
+	double noise;
+};
+
+static struct accuracy_results run_quota(void)
 {
+	unsigned long long loops_at_calibration, loops_at_accuracy, loops_with_disruption;
+	struct accuracy_results results;
 	union evl_sched_ctlparam p;
 	union evl_sched_ctlinfo q;
-	unsigned long long count;
+	struct timespec now, next;
+	pthread_t disruptor;
 	struct sigaction sa;
-	struct timespec ts;
-	double percent;
 	int ret, n;
 
 	sigemptyset(&sa.sa_mask);
@@ -215,127 +246,115 @@ static double run_quota(int quota)
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGTERM, &sa, NULL);
 	sigaction(SIGHUP, &sa, NULL);
-	atexit((void (*)(void))cleanup_group);
 
 	p.quota.op = evl_quota_add;
 	__Tcall_assert(ret, evl_control_sched(SCHED_QUOTA, &p, &q, test_cpu));
+	tgid = q.quota.tgid;
 
 	p.quota.op = evl_quota_set;
-	p.quota.u.set.tgid = q.quota.tgid;
-	p.quota.u.set.quota = quota;
-	p.quota.u.set.quota_peak = quota;
+	p.quota.u.set.tgid = tgid;
+	p.quota.u.set.quota = QUOTA_PERCENT;
+	p.quota.u.set.quota_peak = QUOTA_PERCENT;
 	__Tcall_assert(ret, evl_control_sched(SCHED_QUOTA, &p, &q, test_cpu));
-	tgid = q.quota.tgid;
 
 	do_trace("CPU%d: new thread group #%d, quota sum is %d%%",
 		test_cpu, tgid, q.quota.quota_sum);
+	do_trace("CPU%d: calibration x %d thread%s", test_cpu,
+		nrthreads, nrthreads > 1 ? "s" : "");
 
 	for (n = 0; n < nrthreads; n++) {
-		create_quota_thread(tgid, n);
+		new_thread(&threads[n].tid, SCHED_FIFO, QUOTA_PRIO, quota_thread, (void *)(long)n);
 		__Tcall_assert(ret, evl_get_sem(&ready));
 	}
 
-	__Tcall_assert(ret, evl_lock_mutex(&lock));
-	started = true;
-	__Tcall_assert(ret, evl_broadcast_event(&barrier));
-	__Tcall_assert(ret, evl_unlock_mutex(&lock));
+	reset_quota_period(PERIOD_NS);
+	start_phase(calibration_phase);
 
-	__Tcall_assert(ret, evl_read_clock(EVL_CLOCK_MONOTONIC, &ts));
-	ts.tv_sec += TEST_SECS;
-	__Tcall_assert(ret, evl_sleep_until(EVL_CLOCK_MONOTONIC, &ts));
+	/*
+	 * Wait for the calibration to end, then collect the expected
+	 * number of loops we should be able to run during the
+	 * allotted quota, even in case of runtime disruption.
+	 */
+	for (n = 0, loops_at_calibration = 0; n < nrthreads; n++) {
+		__Tcall_assert(ret, evl_get_sem(&ready));
+		do_trace("CPU%d: calibration: quota_thread[%d]: %llu loops",
+			test_cpu, n, threads[n].loops);
+		loops_at_calibration += threads[n].loops;
+		threads[n].loops = 0;
+	}
 
-	done = true;
+	do_trace("CPU%d: starting accuracy measurement", test_cpu);
 
-	for (n = 0, count = 0; n < nrthreads; n++) {
-		count += threads[n].count;
-		do_trace("CPU%d: done quota_thread[%d], count=%lu",
-			test_cpu, n, threads[n].count);
-		__Tcall_assert(ret, evl_demote_thread(threads[n].efd));
+	reset_quota_period(PERIOD_NS);
+	start_phase(accuracy_measurement_phase);
+
+	/*
+	 * Wait for the accuracy measurement to end, then collect the
+	 * numbers.
+	 */
+	for (n = 0, loops_at_accuracy = 0; n < nrthreads; n++) {
+		__Tcall_assert(ret, evl_get_sem(&ready));
+		do_trace("CPU%d: accuracy: quota_thread[%d]: %llu loops",
+			test_cpu, n, threads[n].loops);
+		loops_at_accuracy += threads[n].loops;
+		threads[n].loops = 0;
+	}
+
+	do_trace("CPU%d: starting noise measurement", test_cpu);
+
+	/* Start the disruptor thread then wait for sync. */
+	new_thread(&disruptor, SCHED_FIFO, DISRUPTOR_PRIO, disruptor_thread, NULL);
+	__Tcall_assert(ret, evl_get_sem(&ready));
+
+	reset_quota_period(PERIOD_NS);
+	start_phase(noise_measurement_phase);
+
+	/* Start disrupting the runtime by steps of DISRUPT_NS nanoseconds. */
+	for (n = 0; n < NR_PERIODS * PERIOD_NS / DISRUPT_NS / 2; n++) {
+		evl_read_clock(EVL_CLOCK_MONOTONIC, &now);
+		timespec_add_ns(&next, &now, DISRUPT_NS);
+		__Tcall_assert(ret, evl_sleep_until(EVL_CLOCK_MONOTONIC, &next));
+		start_phase(disruption_phase);
+		wait_phase(noise_measurement_phase);
+		__Tcall_assert(ret, evl_get_sem(&ready));
 	}
 
 	for (n = 0; n < nrthreads; n++)
 		pthread_join(threads[n].tid, NULL);
 
+	pthread_cancel(disruptor);
+	pthread_join(disruptor, NULL);
+
+	for (n = 0, loops_with_disruption = 0; n < nrthreads; n++) {
+		loops_with_disruption += threads[n].loops;
+		do_trace("CPU%d: noise: quota_thread[%d]: loops=%llu",
+			test_cpu, n, threads[n].loops);
+	}
+
 	/*
-	 * Percentage of completion of the SCHED_QUOTA run for the
-	 * given quota value, compared to the calibration run which
-	 * underwent the SCHED_FIFO policy.
+	 * How much of the full time slice we were able to run for
+	 * expressed as a percentage. The closest to the QUOTA_PERCENT
+	 * target, the better.
 	 */
-	percent = ((double)count / TEST_SECS) * 100.0 / loops_per_sec;
+	results.accuracy = ((double)loops_at_accuracy * 100.0) / (double)loops_at_calibration;
+
+	/*
+	 * Level of noise observed for the disrupted run compared to
+	 * the nominal one. A negative value means that the disrupted
+	 * run was faster than the calibration one, which would still
+	 * be correct.
+	 */
+	results.noise = 100.0 - (((double)loops_with_disruption * 100.0) / (double)loops_at_calibration);
 
 	__Tcall_assert(ret, cleanup_group());
 
-	return percent;
-}
-
-static void timespec_sub(struct timespec *__restrict r,
-		  const struct timespec *__restrict t1,
-		  const struct timespec *__restrict t2)
-{
-	r->tv_sec = t1->tv_sec - t2->tv_sec;
-	r->tv_nsec = t1->tv_nsec - t2->tv_nsec;
-	if (r->tv_nsec < 0) {
-		r->tv_sec--;
-		r->tv_nsec += 1000000000;
-	}
-}
-
-static unsigned long long calibrate(void)
-{
-	struct timespec start, end, delta;
-	const int crunch_loops = 10000;
-	unsigned long long ns, lps;
-	unsigned long count;
-	struct timespec ts;
-	int n, ret;
-
-	count = 0;
-	__Tcall_assert(ret, evl_read_clock(EVL_CLOCK_MONOTONIC, &start));
-	do_work(crunch_loops, &count);
-	__Tcall_assert(ret, evl_read_clock(EVL_CLOCK_MONOTONIC, &end));
-	/* Give in-band a breath between long runs. */
-	__Tcall_assert(ret, evl_usleep(2000));
-
-	timespec_sub(&delta, &end, &start);
-	ns = delta.tv_sec * ONE_BILLION + delta.tv_nsec;
-	crunch_per_sec = (((unsigned long long)count) * ONE_BILLION) / ns;
-
-	for (n = 0; n < nrthreads; n++) {
-		create_fifo_thread(n);
-		__Tcall_assert(ret, evl_get_sem(&ready));
-	}
-
-	__Tcall_assert(ret, evl_lock_mutex(&lock));
-	started = true;
-	__Tcall_assert(ret, evl_broadcast_event(&barrier));
-	__Tcall_assert(ret, evl_unlock_mutex(&lock));
-
-	__Tcall_assert(ret, evl_read_clock(EVL_CLOCK_MONOTONIC, &ts));
-	ts.tv_sec += TEST_SECS;
-	__Tcall_assert(ret, evl_sleep_until(EVL_CLOCK_MONOTONIC, &ts));
-
-	done = true;
-
-	for (n = 0, lps = 0; n < nrthreads; n++)
-		__Tcall_assert(ret, evl_demote_thread(threads[n].efd));
-
-	for (n = 0; n < nrthreads; n++)
-		__Tcall_assert(ret, pthread_join(threads[n].tid, NULL));
-
-	for (n = 0, lps = 0; n < nrthreads; n++)
-		lps += threads[n].count;
-
-	started = false;
-	done = false;
-	__Tcall_assert(ret, evl_usleep(2000));
-
-	return lps;
+	return results;
 }
 
 int main(int argc, char *argv[])
 {
+	struct accuracy_results results;
 	struct sched_param param;
-	double effective;
 	int ret, c;
 
 	for (;;) {
@@ -369,9 +388,12 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	param.sched_priority = 50;
+	atexit((void (*)(void))cleanup_group);
+	set_cpu_affinity();	/* All test threads inherit this. */
+
+	param.sched_priority = MAIN_PRIO;
 	__Tcall_assert(ret, pthread_setschedparam(pthread_self(), SCHED_FIFO, &param));
-	__Tcall_assert(ret, evl_attach_self("sched-quota-accuracy:%d", getpid()));
+	__Tcall_assert(ret, evl_attach_self("quota-accuracy:%d", getpid()));
 
 	__Tcall_assert(ret, evl_new_sem(&ready, "quota-ready:%d", getpid()));
 	__Tcall_assert(ret, evl_new_event(&barrier, "quota-barrier:%d", getpid()));
@@ -385,35 +407,24 @@ int main(int argc, char *argv[])
 	 */
 	test_cpu = pick_test_cpu(test_cpu, false, NULL);
 	do_trace("picked CPU%d for execution", test_cpu);
-	set_thread_affinity();
 
 	if (nrthreads <= 0)
 		nrthreads = 3;
 	if (nrthreads > MAX_THREADS)
 		error(1, EINVAL, "max %d threads", MAX_THREADS);
 
-	calibrate();	/* Warming up, ignore result. */
-	loops_per_sec = calibrate();
+	results = run_quota();
 
-	do_trace("CPU%d: calibrating: %Lu loops/sec", test_cpu, loops_per_sec);
-
-	effective = run_quota(quota);
-
-	if (verbose)	  /* Percentage of quota actually obtained. */
-		do_trace("CPU%d: %d thread%s: cap=%d%%, effective=%.1f%%",
+	if (verbose)
+		do_trace("CPU%d: %d thread%s: quota=%d%%, accuracy=%.1f%% noise=%.1f%%",
 			test_cpu,
 			nrthreads,
 			nrthreads > 1 ?	"s": "",
-			quota,
-			effective);
+			QUOTA_PERCENT,
+			results.accuracy,
+			results.noise);
 
-	/*
-	 * The accuracy value is the alignment of the observed runtime
-	 * of threads within a SCHED_QUOTA group compared to the
-	 * allotted (theoretical) quota, expressed as a percentage
-	 * (i.e. 100% is the best accuracy).
-	 */
-	emit_info("%.1f%%", effective * 100.0 / (double)quota);
+	emit_info("accuracy(%.1f%%) noise(%.1f%%)", results.accuracy, results.noise);
 
 	return EXIT_NO_STATUS;
 }
