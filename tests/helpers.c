@@ -16,9 +16,10 @@
 #include <evl/thread.h>
 #include "helpers.h"
 
-#define ONLINE_CPU_LIST	  "/sys/devices/system/cpu/online"
-#define ISOLATED_CPU_LIST "/sys/devices/system/cpu/isolated"
-#define OOB_CPU_LIST	  "/sys/devices/virtual/evl/control/cpus"
+#define ONLINE_CPU_LIST		"/sys/devices/system/cpu/online"
+#define ISOLATED_CPU_LIST	"/sys/devices/system/cpu/isolated"
+#define OOB_CPU_LIST		"/sys/devices/virtual/evl/control/cpus"
+#define QUOTA_PERIOD		"/sys/devices/virtual/evl/control/quota_period"
 
 static pthread_once_t once_on_vm = PTHREAD_ONCE_INIT;
 
@@ -230,4 +231,22 @@ bool running_on_vm(void)
 	pthread_once(&once_on_vm, check_if_vm);
 
 	return on_vm_flag;
+}
+
+/*
+ * NOTE: A nice and documented side-effect of writing to QUOTA_PRIO is
+ * to reset the start of the base period. We do this to ensure that
+ * each of the calibration and measurement runs are going to fit
+ * within a single period.
+ */
+void reset_quota_period(int quota_period)
+{
+	FILE *fp;
+
+	fp = fopen(QUOTA_PERIOD, "w");
+	if (!fp)
+		error(1, errno, "cannot set quota period");
+
+	fprintf(fp, "%d\n", quota_period);
+	fclose(fp);
 }

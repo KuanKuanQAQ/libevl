@@ -143,4 +143,6 @@ int pick_test_cpu(int hint_cpu,
 
 bool running_on_vm(void);
 
+void reset_quota_period(int quota_period);
+
 #endif /* !_EVL_TESTS_HELPERS_H */
