@@ -19,6 +19,7 @@ libevl_sources = [
     'syscall.c',
     'thread.c',
     'timer.c',
+    'tracing.c',
     'version.c',
     'xbuf.c',
     'intrinsics/event.c',
