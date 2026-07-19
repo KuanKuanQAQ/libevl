@@ -21,6 +21,9 @@ fundle_t __evl_current = EVL_NO_HANDLE;
 __thread __attribute__ ((tls_model (EVL_TLS_MODEL)))
 struct __evl_thread_sstate *__evl_current_sstate;
 
+__thread __attribute__ ((tls_model (EVL_TLS_MODEL)))
+char __evl_local_fmtbuf[EVL_FMTBUF_LEN];
+
 void evli_clear_tls(void)
 {
 	__evl_current = EVL_NO_HANDLE;

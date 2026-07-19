@@ -24,6 +24,11 @@ fundle_t __evl_current;
 extern __thread __attribute__ ((tls_model (EVL_TLS_MODEL)))
 struct __evl_thread_sstate *__evl_current_sstate;
 
+#define EVL_FMTBUF_LEN  1024
+
+extern __thread __attribute__ ((tls_model (EVL_TLS_MODEL)))
+char __evl_local_fmtbuf[EVL_FMTBUF_LEN];
+
 #ifdef __cplusplus
 extern "C" {
 #endif

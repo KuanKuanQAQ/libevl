@@ -19,6 +19,10 @@
 #include <evl/sched-abi.h>
 #include <evl/factory-abi.h>
 
+/*
+ * CAUTION: Any addition to the TLS storage libevl reserves internally
+ * should be accounted for in the default stack size.
+ */
 #define EVL_STACK_DEFAULT			\
 	({					\
 		int __ret = PTHREAD_STACK_MIN;	\
