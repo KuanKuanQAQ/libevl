@@ -23,9 +23,9 @@ trace_groups=
 event_list=
 
 set -- $args
-for opt
+while test $# -gt 0
 do
-case "$opt" in
+case "$1" in
    -e) enable=true
        disable=false
        group=$(eval echo $2)
@@ -36,10 +36,12 @@ case "$opt" in
 	   shift
        fi
        shift
+       shift
        ;;
    -E) enable=true
        disable=false
        tracepoint_file=$(eval echo $2)
+       shift
        shift
        ;;
    -s) bufsz=$(eval echo $2)
