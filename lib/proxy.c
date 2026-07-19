@@ -16,9 +16,6 @@
 
 #define STDSTREAM_BUFSZ  16384
 
-static __thread __attribute__ ((tls_model (EVL_TLS_MODEL)))
-char fmt_buf[1024];
-
 static int evl_outfd = -EBADF, evl_errfd = -EBADF;
 
 void __evl_setup_proxies(void)
@@ -79,8 +76,9 @@ ssize_t evl_read_proxy(int proxyfd, void *buf, size_t count)
 
 ssize_t evl_vprint_proxy(int proxyfd, const char *fmt, va_list ap)
 {
-	ssize_t count = vsnprintf(fmt_buf, sizeof(fmt_buf), fmt, ap), ret;
+	ssize_t count, ret;
 
+	count = vsnprintf(__evl_local_fmtbuf, sizeof(__evl_local_fmtbuf), fmt, ap);
 	if (count < 0)
 		return -errno;	/* assume POSIX behavior. */
 
@@ -90,14 +88,14 @@ ssize_t evl_vprint_proxy(int proxyfd, const char *fmt, va_list ap)
 	 */
 	if (proxyfd < 0) {
 		if (evl_is_inband()) {
-			ret = write(2, fmt_buf, count);
+			ret = write(2, __evl_local_fmtbuf, count);
 			if (ret < 0)
 				ret = -errno;
 		} else {
 			ret = -EBADFD;
 		}
 	} else {
-		ret = evl_write_proxy(proxyfd, fmt_buf, count);
+		ret = evl_write_proxy(proxyfd, __evl_local_fmtbuf, count);
 	}
 
 	return ret;
