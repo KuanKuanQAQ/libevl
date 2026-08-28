@@ -389,15 +389,6 @@ int main(int argc, char *argv[])
 	}
 
 	atexit((void (*)(void))cleanup_group);
-	set_cpu_affinity();	/* All test threads inherit this. */
-
-	param.sched_priority = MAIN_PRIO;
-	__Tcall_assert(ret, pthread_setschedparam(pthread_self(), SCHED_FIFO, &param));
-	__Tcall_assert(ret, evl_attach_self("quota-accuracy:%d", getpid()));
-
-	__Tcall_assert(ret, evl_new_sem(&ready, "quota-ready:%d", getpid()));
-	__Tcall_assert(ret, evl_new_event(&barrier, "quota-barrier:%d", getpid()));
-	__Tcall_assert(ret, evl_new_mutex(&lock, "quota-lock:%d", getpid()));
 
 	/*
 	 * We need all threads to be pinned on the same (oob-capable)
@@ -407,6 +398,15 @@ int main(int argc, char *argv[])
 	 */
 	test_cpu = pick_test_cpu(test_cpu, false, NULL);
 	do_trace("picked CPU%d for execution", test_cpu);
+	set_cpu_affinity();	/* All test threads inherit this. */
+
+	param.sched_priority = MAIN_PRIO;
+	__Tcall_assert(ret, pthread_setschedparam(pthread_self(), SCHED_FIFO, &param));
+	__Tcall_assert(ret, evl_attach_self("quota-accuracy:%d", getpid()));
+
+	__Tcall_assert(ret, evl_new_sem(&ready, "quota-ready:%d", getpid()));
+	__Tcall_assert(ret, evl_new_event(&barrier, "quota-barrier:%d", getpid()));
+	__Tcall_assert(ret, evl_new_mutex(&lock, "quota-lock:%d", getpid()));
 
 	if (nrthreads <= 0)
 		nrthreads = 3;
