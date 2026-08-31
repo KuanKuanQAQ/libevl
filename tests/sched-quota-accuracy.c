@@ -275,8 +275,9 @@ static struct accuracy_results run_quota(void)
 	 * number of loops we should be able to run during the
 	 * allotted quota, even in case of runtime disruption.
 	 */
-	for (n = 0, loops_at_calibration = 0; n < nrthreads; n++) {
+	for (n = 0; n < nrthreads; n++)
 		__Tcall_assert(ret, evl_get_sem(&ready));
+	for (n = 0, loops_at_calibration = 0; n < nrthreads; n++) {
 		do_trace("CPU%d: calibration: quota_thread[%d]: %llu loops",
 			test_cpu, n, threads[n].loops);
 		loops_at_calibration += threads[n].loops;
@@ -292,8 +293,9 @@ static struct accuracy_results run_quota(void)
 	 * Wait for the accuracy measurement to end, then collect the
 	 * numbers.
 	 */
-	for (n = 0, loops_at_accuracy = 0; n < nrthreads; n++) {
+	for (n = 0; n < nrthreads; n++)
 		__Tcall_assert(ret, evl_get_sem(&ready));
+	for (n = 0, loops_at_accuracy = 0; n < nrthreads; n++) {
 		do_trace("CPU%d: accuracy: quota_thread[%d]: %llu loops",
 			test_cpu, n, threads[n].loops);
 		loops_at_accuracy += threads[n].loops;
