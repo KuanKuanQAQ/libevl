@@ -171,14 +171,14 @@ static void *quota_thread(void *arg)
 	__Tcall_assert(t->efd, evl_attach_self("quota-runner:%d.%d",
 						getpid(), serial));
 
+	wait_phase(calibration_phase);
+
+	do_work(t, PERIOD_NS * NR_PERIODS);
+
 	attrs.sched_policy = SCHED_QUOTA;
 	attrs.sched_priority = QUOTA_PRIO;
 	attrs.sched_quota_group = tgid;
 	__Tcall_assert(ret, evl_set_schedattr(t->efd, &attrs));
-
-	wait_phase(calibration_phase);
-
-	do_work(t, PERIOD_NS * NR_PERIODS);
 
 	wait_phase(accuracy_measurement_phase);
 
@@ -338,7 +338,8 @@ static struct accuracy_results run_quota(void)
 	 * expressed as a percentage. The closest to the QUOTA_PERCENT
 	 * target, the better.
 	 */
-	results.accuracy = ((double)loops_at_accuracy * 100.0) / (double)loops_at_calibration;
+	results.accuracy = 100.0 *
+		((double)loops_at_accuracy * 100.0 / QUOTA_PERCENT) / (double)loops_at_calibration;
 
 	/*
 	 * Level of noise observed for the disrupted run compared to
@@ -346,7 +347,8 @@ static struct accuracy_results run_quota(void)
 	 * run was faster than the calibration one, which would still
 	 * be correct.
 	 */
-	results.noise = 100.0 - (((double)loops_with_disruption * 100.0) / (double)loops_at_calibration);
+	results.noise = 100.0 - (100.0 *
+		((double)loops_with_disruption * 100.0 / QUOTA_PERCENT) / (double)loops_at_calibration);
 
 	__Tcall_assert(ret, cleanup_group());
 
