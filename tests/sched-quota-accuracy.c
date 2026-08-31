@@ -26,15 +26,13 @@
 
 #define MAX_THREADS	8
 #define QUOTA_PRIO	1
-#define DISRUPTOR_PRIO	2
-#define MAIN_PRIO	3
+#define MAIN_PRIO	2
 
 enum runtime_phase {
 	idle_phase,
 	calibration_phase,
 	accuracy_measurement_phase,
 	noise_measurement_phase,
-	disruption_phase,
 } current_phase = idle_phase;
 
 static struct quota_thread_desc {
@@ -111,23 +109,6 @@ static void wait_phase(enum runtime_phase phase)
 	__Tcall_assert(ret, evl_unlock_mutex(&lock));
 }
 
-static void wait_edge(enum runtime_phase phase)
-{
-	enum runtime_phase old_phase = phase;
-	int ret;
-
-	__Tcall_assert(ret, evl_lock_mutex(&lock));
-	for (;;) {
-		if (current_phase == phase) {
-			current_phase = old_phase;
-			break;
-		}
-		old_phase = current_phase;
-		__Tcall_assert(ret, evl_wait_event(&barrier, &lock));
-	}
-	__Tcall_assert(ret, evl_unlock_mutex(&lock));
-}
-
 static void start_phase(enum runtime_phase phase)
 {
 	int ret;
@@ -191,24 +172,6 @@ static void *quota_thread(void *arg)
 	return NULL;
 }
 
-static void *disruptor_thread(void *arg)
-{
-	int ret;
-
-	__Tcall_assert(ret, evl_attach_self("quota-disruptor:%d", getpid()));
-
-	wait_phase(noise_measurement_phase);
-
-	for (;;) {
-		wait_edge(disruption_phase);
-		do_trace("(...disrupting...)");
-		do_work(NULL, DISRUPT_NS);
-		start_phase(noise_measurement_phase);
-	}
-
-	return NULL;
-}
-
 static int cleanup_group(void)
 {
 	union evl_sched_ctlparam p;
@@ -236,7 +199,6 @@ static struct accuracy_results run_quota(void)
 	union evl_sched_ctlparam p;
 	union evl_sched_ctlinfo q;
 	struct timespec now, next;
-	pthread_t disruptor;
 	struct sigaction sa;
 	int ret, n;
 
@@ -304,10 +266,6 @@ static struct accuracy_results run_quota(void)
 
 	do_trace("CPU%d: starting noise measurement", test_cpu);
 
-	/* Start the disruptor thread then wait for sync. */
-	new_thread(&disruptor, SCHED_FIFO, DISRUPTOR_PRIO, disruptor_thread, NULL);
-	__Tcall_assert(ret, evl_get_sem(&ready));
-
 	reset_quota_period(PERIOD_NS);
 	start_phase(noise_measurement_phase);
 
@@ -316,16 +274,12 @@ static struct accuracy_results run_quota(void)
 		evl_read_clock(EVL_CLOCK_MONOTONIC, &now);
 		timespec_add_ns(&next, &now, DISRUPT_NS);
 		__Tcall_assert(ret, evl_sleep_until(EVL_CLOCK_MONOTONIC, &next));
-		start_phase(disruption_phase);
-		wait_phase(noise_measurement_phase);
-		__Tcall_assert(ret, evl_get_sem(&ready));
+		do_trace("(...disrupting...)");
+		do_work(NULL, DISRUPT_NS);
 	}
 
 	for (n = 0; n < nrthreads; n++)
 		pthread_join(threads[n].tid, NULL);
-
-	pthread_cancel(disruptor);
-	pthread_join(disruptor, NULL);
 
 	for (n = 0, loops_with_disruption = 0; n < nrthreads; n++) {
 		loops_with_disruption += threads[n].loops;
