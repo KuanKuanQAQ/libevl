@@ -174,6 +174,12 @@ int main(int argc, char *argv[])
 	set_thread_affinity();
 
 	/*
+	 * Only EVL threads may change the TP schedule (linux-evl doc
+	 * 30), so attach before installing it.
+	 */
+	__Tcall_assert(ret, evl_attach_self("sched-tp-accuracy-main:%d", getpid()));
+
+	/*
 	 * For a recurring global time frame of 400 ms, we define a TP
 	 * schedule as follows:
 	 *
