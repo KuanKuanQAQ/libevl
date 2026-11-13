@@ -56,11 +56,16 @@ int evl_create_proxy(int targetfd, size_t bufsz, size_t granularity,
 	return efd;
 }
 
+/*
+ * Proxies only serve oob I/O: in-band read()/write() on a proxy are
+ * not supported. An EVL thread running in-band is switched to oob by
+ * the call; a thread not attached to the EVL core gets -EPERM.
+ */
 ssize_t evl_write_proxy(int proxyfd, const void *buf, size_t count)
 {
 	ssize_t ret;
 
-	ret = __evl_transparent_call(proxyfd, write, buf, count);
+	ret = oob_write(proxyfd, buf, count);
 
 	return ret < 0 ? -errno : ret;
 }
@@ -69,7 +74,7 @@ ssize_t evl_read_proxy(int proxyfd, void *buf, size_t count)
 {
 	ssize_t ret;
 
-	ret = __evl_transparent_call(proxyfd, read, buf, count);
+	ret = oob_read(proxyfd, buf, count);
 
 	return ret < 0 ? -errno : ret;
 }
@@ -94,6 +99,17 @@ ssize_t evl_vprint_proxy(int proxyfd, const char *fmt, va_list ap)
 		} else {
 			ret = -EBADFD;
 		}
+	} else if (evl_get_self() < 0 &&
+		(proxyfd == evl_outfd || proxyfd == evl_errfd)) {
+		/*
+		 * Not attached, so oob_write() is not available: write
+		 * to the target stream directly. Ordering with output
+		 * still queued in the proxy is not guaranteed.
+		 */
+		ret = write(proxyfd == evl_outfd ? fileno(stdout) :
+			fileno(stderr), __evl_local_fmtbuf, count);
+		if (ret < 0)
+			ret = -errno;
 	} else {
 		ret = evl_write_proxy(proxyfd, __evl_local_fmtbuf, count);
 	}
